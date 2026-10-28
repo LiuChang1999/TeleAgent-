@@ -1,3 +1,4 @@
 Microsoft.Web.WebView2 1.0.3800.47
 https://api.nuget.org/v3-flatcontainer/microsoft.web.webview2/1.0.3800.47/microsoft.web.webview2.1.0.3800.47.nupkg
 package SHA256 56c9f26bdd07916a2d1949fb58a5c7e434dfa1173577dca879206050c4e718db
+Embedded x64 WebView2Loader.dll SHA256 86545B66CDB0603BC26B626FB9AD610CB6E71F28D468F5EA66DF23B03DDA96D5 (Microsoft Corporation Authenticode signature verified)

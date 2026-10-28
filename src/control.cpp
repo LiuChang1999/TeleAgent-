@@ -1,5 +1,6 @@
 #include "control.h"
 #include "installation.h"
+#include "desk.h"
 #include <tlhelp32.h>
 #include <chrono>
 #include <thread>
@@ -111,10 +112,7 @@ void saveCurrentSession(const Config& c){
     writeAtomic(path/L"latest.json",Json(Json::Object{{"snapshot",utf8(snapshot.filename().wstring())}}).dump());
 }
 void appendHistory(const Config& c,const std::string& owner,bool success,const std::string& reason={}){
-    auto path=c.state/L"switch-history.json";auto history=loadJson(path);Json::Array entries;if(history.array())entries=std::get<Json::Array>(history.v);
-    entries.emplace_back(Json::Object{{"owner",owner},{"success",success},{"time",Json::num(nowSeconds())},{"reason",reason}});
-    if(entries.size()>50)entries.erase(entries.begin(),entries.end()-50);
-    writeAtomic(path,Json(entries).dump());
+    recordOperation(c,"switch",owner,success,reason);
 }
 } // namespace
 
@@ -154,33 +152,47 @@ void automaticStop(const Config& c,Progress progress){
     deadline=GetTickCount64()+5000;while(GetTickCount64()<deadline){if(teleagentProcesses(c).empty()){recordObservedAccounts(c);return;}Sleep(100);}
     error("TeleAgent did not finish shutting down; account data was not replaced");
 }
-void automaticSwitch(const Config& c,const std::string& owner,Progress progress){
-    if(c.fixture)error("Automatic app control is disabled for fixture data");
-    if(!validExecutable(c.exe))error("TeleAgent executable is missing");
-    if(!validOwner(owner))error("Invalid account");
-    auto before=scanAccounts(c);auto target=std::find_if(before.accounts.begin(),before.accounts.end(),[&](auto& a){return a.owner==owner;});
-    if(!before.error.empty()||target==before.accounts.end())error("Account not found");
-    if(!target->token||target->relogin)error("This account has no saved login session; sign in once first");
-    std::string original=before.pointer["ownerDir"].str();privateDirectory(c.state);
+void automaticSwitch(const Config& c,const std::string& owner,Progress progress,const std::atomic_bool* stop,bool history){
+    auto cancelled=[&]{if(stop&&stop->load())throw PollCancelled();};
     try{
+        cancelled();
+        if(c.fixture)error("Automatic app control is disabled for fixture data");
+        if(!validExecutable(c.exe))error("TeleAgent executable is missing");
+        if(!validOwner(owner))error("Invalid account");
+        auto before=scanAccounts(c);auto target=std::find_if(before.accounts.begin(),before.accounts.end(),[&](auto& a){return a.owner==owner;});
+        if(!before.error.empty()||target==before.accounts.end())error("Account not found");
+        if(!target->token||target->relogin)error("This account has no saved login session; sign in once first");
+        privateDirectory(c.state);
         automaticStop(c,progress);step(progress,L"正在保存当前账号的会话备份…");saveCurrentSession(c);
+        cancelled();
         step(progress,L"正在选择目标账号…");switchAccount(c,owner);
         step(progress,L"正在打开 TeleAgent 并恢复登录…");launchManaged(c);
         ULONGLONG deadline=GetTickCount64()+40000;std::string lastError;
         while(GetTickCount64()<deadline){
+            cancelled();
             try{syncLiveAccount(c);auto cache=loadJson(c.state/L"session-cache.json");auto active=loadJson(c.root/L"current-owner.json")["ownerDir"].str();
                 if(active!=owner&&validOwner(active))error("TeleAgent restored a different account");
-                if(active==owner&&cache[owner]["live"].boolean()&&cache[owner]["identityVerified"].boolean()&&nowSeconds()-cache[owner]["observedAt"].integer()<4){appendHistory(c,owner,true);step(progress,L"切换成功，已识别目标账号");return;}
+                if(active==owner&&cache[owner]["live"].boolean()&&cache[owner]["identityVerified"].boolean()&&nowSeconds()-cache[owner]["observedAt"].integer()<4){if(history)appendHistory(c,owner,true);step(progress,L"切换成功，已识别目标账号");return;}
             }catch(const std::exception& e){lastError=e.what();}
             Sleep(500);
         }
         (void)lastError;error("Could not confirm the target identity; inspect the TeleAgent window");
     }catch(const std::exception& e){
-        appendHistory(c,owner,false,e.what());
+        if(history)try{appendHistory(c,owner,false,e.what());}catch(...){}
         // Retain the target window for a normal expired-session sign-in. All
         // source login files and the previous account's snapshot remain intact.
-        (void)original;throw;
+        throw;
     }
+}
+void saveVerifiedAccountSession(const Config& c,const std::string& owner,Progress progress){
+    auto currentOwner=[&]{return loadJson(c.root/L"current-owner.json")["ownerDir"].str();};
+    auto base=c.state/L"sessions"/wide(owner);auto previous=loadJson(base/L"latest.json")["snapshot"].str();
+    if(currentOwner()!=owner)error("TeleAgent restored a different account");
+    automaticStop(c,progress);
+    if(currentOwner()!=owner)error("TeleAgent restored a different account");
+    step(progress,L"正在保存已核对账号的登录快照…");saveCurrentSession(c);
+    auto snapshot=loadJson(base/L"latest.json")["snapshot"].str();
+    if(snapshot.empty()||snapshot==previous||fs::path(wide(snapshot)).filename()!=fs::path(wide(snapshot))||loadJson(base/wide(snapshot)/L"manifest.json")["owner"].str()!=owner)error("Cannot save verified account session");
 }
 void automaticNewLogin(const Config& c,Progress progress){
     if(c.fixture)error("Automatic app control is disabled for fixture data");
